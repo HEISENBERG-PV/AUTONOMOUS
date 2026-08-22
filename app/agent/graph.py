@@ -1,304 +1,246 @@
-from langgraph.graph import StateGraph, START, END
+import os
 
-from .state import AgentState
+from dotenv import load_dotenv
 
-from tools.ecommerce_tools import (
-    get_customer,
-    get_order,
-    check_return_eligibility,
-    create_return,
-    schedule_pickup,
-    create_replacement,
-    update_shipping_address
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_mistralai import ChatMistralAI
+from langgraph.graph import (
+    StateGraph,
+    START,
+    END,
 )
 
+from langgraph.prebuilt import ToolNode
+
+from state import AgentState
+from mcp_client import MCPClient
+from tools import MCPToolManager
 
 
-def understand_intent(state: AgentState):
+load_dotenv()
 
-    request = state["customer_request"]
-
-    print("\n[AGENT] Understanding customer request...")
-
-    state["intent"] = "product_replacement"
-    state["product"] = "headphones"
-    state["reason"] = "defective"
-
-    print(f"[AGENT] Intent: {state['intent']}")
-    print(f"[AGENT] Product: {state['product']}")
-    print(f"[AGENT] Reason: {state['reason']}")
-
-    return state
-
-
-def create_plan(state: AgentState):
-
-    print("\n[AGENT] Creating execution plan...")
-
-    plan = [
-        "get_customer",
-        "get_order",
-        "check_return_eligibility",
-        "create_return",
-        "schedule_pickup",
-        "create_replacement"
-    ]
-
-    state["plan"] = plan
-
-    print("\nPLAN")
-
-    for i, step in enumerate(plan, 1):
-        print(f"{i}. {step}")
-
-    return state
+model = ChatMistralAI(
+    model="mistral-large-latest",
+    temperature=0,
+)
+# model = ChatGoogleGenerativeAI(
+#     model="gemini-2.5-flash",
+#     temperature=0,
+# )
 
 
 
-def execute_resolution(state: AgentState):
+SYSTEM_PROMPT = """
+You are an autonomous e-commerce resolution agent.
 
-    print("\n[AGENT] Executing resolution...\n")
+Your job is to resolve customer requests by using the available
+MCP tools. You should act autonomously whenever the required
+information can be obtained from the tools.
 
-    customer = get_customer("CUST001")
+IMPORTANT RULES:
 
-    order = get_order("ORD001")
+1. NEVER ask the customer for an order ID if you can identify
+   the order using the available tools.
 
-    eligibility = check_return_eligibility(
-        "ORD001"
+2. NEVER invent customer information, order IDs, product IDs,
+   payment information, or other data.
+
+3. For a replacement request, follow this workflow:
+
+   - Identify the customer using available customer/order tools.
+   - Find the relevant order.
+   - Check return eligibility.
+   - Check payment information if required.
+   - Create the return.
+   - Schedule the pickup.
+   - Create the replacement.
+
+4. Routine actions required to resolve the customer's request
+   should be performed autonomously.
+
+5. Do NOT perform actions outside the customer's requested
+   resolution.
+
+6. If an action is potentially high-impact or outside the
+   declared resolution plan, do not attempt to bypass
+   authorization controls.
+
+7. Use the MCP tools whenever they can provide the information
+   or perform the action you need.
+
+For example:
+
+Customer:
+"My headphones are defective. I want a replacement."
+
+You should NOT respond:
+"Please provide your order ID."
+
+Instead, use the available tools to identify the customer/order
+and continue the resolution workflow.
+"""
+
+
+
+
+async def agent_node(
+    state: AgentState
+):
+
+    messages = state.get(
+        "messages",
+        []
     )
 
-    if not eligibility["eligible"]:
-
-        state["status"] = "failed"
-
-        return state
-
-    return_request = create_return(
-        "ORD001",
-        "defective product"
+    response = await model.ainvoke(
+        [
+            (
+                "system",
+                SYSTEM_PROMPT
+            ),
+            *messages
+        ]
     )
 
-    pickup = schedule_pickup(
-        return_request["return_id"]
-    )
-
-    replacement = create_replacement(
-        "ORD001"
-    )
-
-    state["results"] = {
-        "customer": customer,
-        "order": order,
-        "eligibility": eligibility,
-        "return": return_request,
-        "pickup": pickup,
-        "replacement": replacement
+    return {
+        "messages": [
+            response
+        ]
     }
 
-    state["status"] = "completed"
-
-    return state
 
 
 
-def attempt_unauthorized_action(state: AgentState):
 
-    print(
-        "\n[AGENT] I think changing the "
-        "shipping address would help the customer..."
+
+
+def should_continue(state: AgentState):
+
+    last_message = state["messages"][-1]
+
+    if hasattr(
+        last_message,
+        "tool_calls"
+    ):
+
+        if last_message.tool_calls:
+            return "tools"
+
+    return "end"
+
+
+
+async def build_graph():
+
+    client = MCPClient()
+
+    await client.connect(
+    "commerce",
+    "http://127.0.0.1:8001/mcp"
+)
+
+    await client.connect(
+    "fulfillment",
+    "http://127.0.0.1:8002/mcp"
+)
+
+    await client.connect(
+    "payment",
+    "http://127.0.0.1:8003/mcp"
+)
+
+    manager = MCPToolManager(client)
+
+    tools = await manager.get_tools()
+
+    print("\nTOOL SCHEMAS:")
+
+    for tool in tools:
+        print(f"  ✓ {tool.name}")
+        print(tool.args_schema.model_json_schema())
+
+    model_with_tools = model.bind_tools(
+        tools
     )
 
-    state["pending_action"] = {
-        "tool": "update_shipping_address",
-        "arguments": {
-            "order_id": "ORD001",
-            "new_address": "New Delhi, India"
-        }
-    }
+    async def agent(
+        state: AgentState
+    ):
 
-    state["status"] = "pending_authorization"
+        # print("\n===== MESSAGES BEFORE GEMINI =====")
 
-    return state
+        # for i, msg in enumerate(state["messages"]):
+        #     print(f"\nMESSAGE {i}")
+        #     print("TYPE:", type(msg))
+        #     print("CONTENT:", repr(msg.content))
+        #     print("TOOL_CALLS:", getattr(msg, "tool_calls", None))
+        #     print("TOOL_CALL_ID:", getattr(msg, "tool_call_id", None))
 
+        # print("\n==================================")
 
-
-from governance.armoriq import authorize
-
-
-def authorization_check(state: AgentState):
-
-    action = state["pending_action"]["tool"]
-
-    decision = authorize(action)
-
-    if decision["decision"] == "ALLOW":
-
-        state["status"] = "authorized"
-
-    else:
-
-        state["status"] = "held"
-
-    return state
-
-
-
-def human_approval(state: AgentState):
-
-    action = state["pending_action"]
-
-    print("\n" + "=" * 50)
-    print("⚠️  HUMAN APPROVAL REQUIRED")
-    print("=" * 50)
-
-    print(f"Action: {action['tool']}")
-
-    print(
-        f"Arguments: "
-        f"{action['arguments']}"
-    )
-
-    print(
-        "\nReason: "
-        "Action is outside declared authorization."
-    )
-
-    choice = input(
-        "\nApprove action? (yes/no): "
-    )
-
-    if choice.lower() == "yes":
-
-        state["status"] = "approved"
-
-    else:
-
-        state["status"] = "rejected"
-
-    return state
-
-
-
-
-
-def execute_pending_action(state: AgentState):
-
-    action = state["pending_action"]
-
-    if action["tool"] == "update_shipping_address":
-
-        result = update_shipping_address(
-            action["arguments"]["order_id"],
-            action["arguments"]["new_address"]
+        response = await model_with_tools.ainvoke(
+            [
+                (
+                    "system",
+                    SYSTEM_PROMPT
+                ),
+                *state["messages"]
+            ]
         )
 
-        state["results"]["address_update"] = result
+        return {
+            "messages": state["messages"] + [response]
+}
 
-    state["status"] = "completed"
-
-    return state
-
-
-
-
-def build_graph():
-
-    graph = StateGraph(AgentState)
-
-    graph.add_node(
-        "understand_intent",
-        understand_intent
+    graph = StateGraph(
+        AgentState
     )
 
     graph.add_node(
-        "create_plan",
-        create_plan
+        "agent",
+        agent
     )
 
     graph.add_node(
-        "execute_resolution",
-        execute_resolution
-    )
-
-    graph.add_node(
-        "attempt_unauthorized_action",
-        attempt_unauthorized_action
-    )
-
-    graph.add_node(
-        "authorization_check",
-        authorization_check
-    )
-
-    graph.add_node(
-        "human_approval",
-        human_approval
-    )
-
-    graph.add_node(
-        "execute_pending_action",
-        execute_pending_action
+        "tools",
+        ToolNode(tools)
     )
 
     graph.add_edge(
         START,
-        "understand_intent"
-    )
-
-    graph.add_edge(
-        "understand_intent",
-        "create_plan"
-    )
-
-    graph.add_edge(
-        "create_plan",
-        "execute_resolution"
-    )
-
-    graph.add_edge(
-        "execute_resolution",
-        "attempt_unauthorized_action"
-    )
-
-    graph.add_edge(
-        "attempt_unauthorized_action",
-        "authorization_check"
+        "agent"
     )
 
     graph.add_conditional_edges(
-        "authorization_check",
-
-        lambda state: state["status"],
-
+        "agent",
+        should_continue,
         {
-            "authorized":
-                "execute_pending_action",
-
-            "held":
-                "human_approval"
-        }
-    )
-
-    graph.add_conditional_edges(
-        "human_approval",
-
-        lambda state: state["status"],
-
-        {
-            "approved":
-                "execute_pending_action",
-
-            "rejected":
-                END
+            "tools": "tools",
+            "end": END,
         }
     )
 
     graph.add_edge(
-        "execute_pending_action",
-        END
+        "tools",
+        "agent"
     )
 
-    return graph.compile()
+    return graph.compile(), client
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

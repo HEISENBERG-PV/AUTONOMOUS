@@ -1,9 +1,16 @@
 from typing import TypedDict, List, Dict, Any
+from typing import Annotated
+from langgraph.graph.message import add_messages
+
+from langchain_core.messages import BaseMessage
 
 
 class AgentState(TypedDict):
 
     customer_request: str
+
+    messages: Annotated[list[BaseMessage], add_messages]
+
 
     intent: str
 
@@ -11,12 +18,10 @@ class AgentState(TypedDict):
 
     reason: str
 
+    order_id: str
+
     plan: List[str]
 
-    current_step: int
-
     results: Dict[str, Any]
-
-    pending_action: Dict[str, Any]
 
     status: str

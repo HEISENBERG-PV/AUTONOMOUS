@@ -1,0 +1,37 @@
+version: v1
+identity:
+  
+  api_key: ak_live_1b214e373e907c5b67172f4bdd201358c3908eec1e397928db67cacb143227fd
+  
+  user_id: d78eb9c7-63de-4dd9-a3c9-a4125bcefe0d
+  agent_id: ecommerce-resolution-agent
+environment: sandbox
+proxy:
+  url: https://proxy.armoriq.ai
+  timeout: 30
+  max_retries: 3
+mcp_servers:
+- id: commerce
+  url: https://patronage-cosponsor-carpentry.ngrok-free.dev/commerce/mcp
+  auth: none
+- id: fulfillment
+  url: https://patronage-cosponsor-carpentry.ngrok-free.dev/fulfillment/mcp
+  auth: none
+- id: payment
+  url: https://patronage-cosponsor-carpentry.ngrok-free.dev/payment/mcp
+  auth: none
+policy:
+  allow:
+  - commerce.check_return_policy
+  - commerce.create_return
+  - commerce.get_customer
+  - commerce.get_order
+  - fulfillment.create_replacement
+  - fulfillment.schedule_pickup
+  - fulfillment.update_shipping_address
+  - payment.get_payment
+  - payment.issue_refund
+  deny: []
+intent:
+  ttl_seconds: 300
+  require_csrg: true
