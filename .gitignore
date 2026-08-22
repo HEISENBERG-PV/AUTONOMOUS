@@ -2,3 +2,5 @@
 .venv
 governance/
 tools/
+armoriq.yaml
+test_commerce_stdio.py
